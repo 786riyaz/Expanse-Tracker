@@ -11,25 +11,25 @@ import sequelize from "../config/db.js";
 //   false the moment the password is actually reset, so the same link
 //   can't be replayed later.
 const ForgotPasswordRequest = sequelize.define(
-  "ForgotPasswordRequest",
-  {
-    id: {
-      type: DataTypes.UUID,
-      primaryKey: true,
-    },
-    userId: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
-    },
-    isActive: {
-      type: DataTypes.BOOLEAN,
-      allowNull: false,
-      defaultValue: true,
-    },
-  },
-  {
-    tableName: "forgot_password_requests",
-    timestamps: true,
-  },
+"ForgotPasswordRequest",
+{
+id: {
+type: DataTypes.UUID,
+primaryKey: true,
+},
+userId: {
+type: DataTypes.INTEGER,
+allowNull: false,
+},
+isActive: {
+type: DataTypes.BOOLEAN,
+allowNull: false,
+defaultValue: true,
+},
+},
+{
+tableName: "forgot_password_requests",
+timestamps: true,
+},
 );
 export default ForgotPasswordRequest;

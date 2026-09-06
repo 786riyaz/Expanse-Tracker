@@ -1,16 +1,21 @@
 // public/js/reports.js
-// Premium "Reports" feature. Daily/weekly/monthly/all views are still
-// aggregated client-side from GET /expanse. The "Download" button now
-// calls the backend, which builds a CSV of ALL of this user's expenses,
-// uploads it to S3, and returns a time-limited presigned URL - the file
-// itself never touches this server's disk. Past downloads are listed
-// below via GET /report/history (see routes/report.js).
+// Premium "Reports" feature. Daily/Monthly/Yearly/All views are all
+// aggregated client-side from GET /expanse (already loaded in full into
+// `allExpenses`). The Daily tab has a date picker, the Monthly tab has
+// month + year selects, and the Yearly tab has a year select - each one
+// scopes both the on-screen table AND the "Download" button, which asks
+// the backend for a CSV of just that date/month/year (see
+// controllers/report.js). The backend builds it, uploads it to S3, and
+// returns a time-limited presigned URL - the file itself never touches
+// this server's disk. Past downloads are listed below via
+// GET /report/history (see routes/report.js).
 const premiumBadge = document.getElementById("premiumBadge");
 const lockedCard = document.getElementById("lockedCard");
 const reportContent = document.getElementById("reportContent");
 const reportEmpty = document.getElementById("reportEmpty");
 const reportTables = document.getElementById("reportTables");
 const downloadBtn = document.getElementById("downloadBtn");
+const downloadBtnLabel = document.getElementById("downloadBtnLabel");
 const viewTabs = document.getElementById("viewTabs");
 const totalIncomeEl = document.getElementById("totalIncome");
 const totalExpenseEl = document.getElementById("totalExpense");
@@ -24,10 +29,21 @@ const downloadResult = document.getElementById("downloadResult");
 const reportHistoryEmpty = document.getElementById("reportHistoryEmpty");
 const reportHistoryTable = document.getElementById("reportHistoryTable");
 const reportHistoryBody = document.getElementById("reportHistoryBody");
+
+// Per-tab filter controls
+const dailyFilter = document.getElementById("dailyFilter");
+const dailyDatePicker = document.getElementById("dailyDatePicker");
+const monthlyFilter = document.getElementById("monthlyFilter");
+const monthSelect = document.getElementById("monthSelect");
+const yearSelectMonthly = document.getElementById("yearSelectMonthly");
+const yearlyFilter = document.getElementById("yearlyFilter");
+const yearSelectYearly = document.getElementById("yearSelectYearly");
+
 let allExpenses = [];
 let currentView = "daily";
 let isPremiumUser = false;
-// "All Expenses" tab pagination - independent of the Daily/Weekly/Monthly
+
+// "All Expenses" tab pagination - independent of the Daily/Monthly/Yearly
 // views above, which need the FULL unpaginated `allExpenses` array to
 // compute correct totals/subtotals. Page size is user-configurable and
 // shared with the dashboard's preference via the same localStorage key.
@@ -37,6 +53,7 @@ const DEFAULT_PAGE_SIZE = 10;
 let allViewPageSize = getStoredPageSize();
 let allViewPage = 1;
 let allViewTotalPages = 1;
+
 function getStoredPageSize() {
   try {
     const stored = parseInt(localStorage.getItem(PAGE_SIZE_STORAGE_KEY), 10);
@@ -61,11 +78,18 @@ allPageSizeSelect.addEventListener("change", () => {
   setStoredPageSize(allViewPageSize);
   loadAllExpensesPage(1);
 });
+
 // Categories that represent money coming in. The Expanse model doesn't
 // have an explicit income/expense flag yet, so - matching how "Salary"
 // is already used as a category in this app - anything filed under
 // Salary is treated as income and everything else as an expense.
 const INCOME_CATEGORIES = new Set(["Salary"]);
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
 async function checkAuthAndLoad() {
   try {
     const res = await fetch("/user/session");
@@ -87,6 +111,7 @@ async function checkAuthAndLoad() {
     setDownloadEnabled(true);
     initPageSizeSelect();
     await loadExpenses();
+    initFilterControls();
     renderCurrentView();
     await loadReportHistory();
   } catch {
@@ -102,6 +127,53 @@ function setDownloadEnabled(enabled) {
   downloadBtn.disabled = !enabled;
   downloadBtn.title = enabled ? "Download report" : "Upgrade to Premium to download reports";
 }
+
+// --- Filter controls (date picker / month & year selects / year select) ---
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function yearsFromExpenses() {
+  const years = new Set([new Date().getFullYear()]);
+  allExpenses.forEach((exp) => years.add(new Date(exp.createdAt).getFullYear()));
+  return [...years].sort((a, b) => b - a);
+}
+function initFilterControls() {
+  const now = new Date();
+  const years = yearsFromExpenses();
+
+  dailyDatePicker.value = todayStr();
+  dailyDatePicker.max = todayStr();
+
+  monthSelect.innerHTML = MONTH_NAMES.map((name, i) => `<option value="${i + 1}">${name}</option>`).join("");
+  monthSelect.value = String(now.getMonth() + 1);
+  yearSelectMonthly.innerHTML = years.map((y) => `<option value="${y}">${y}</option>`).join("");
+  yearSelectMonthly.value = String(now.getFullYear());
+
+  yearSelectYearly.innerHTML = years.map((y) => `<option value="${y}">${y}</option>`).join("");
+  yearSelectYearly.value = String(now.getFullYear());
+
+  dailyDatePicker.addEventListener("change", () => {
+    if (currentView === "daily") renderCurrentView();
+  });
+  monthSelect.addEventListener("change", () => {
+    if (currentView === "monthly") renderCurrentView();
+  });
+  yearSelectMonthly.addEventListener("change", () => {
+    if (currentView === "monthly") renderCurrentView();
+  });
+  yearSelectYearly.addEventListener("change", () => {
+    if (currentView === "yearly") renderCurrentView();
+  });
+}
+function updateFilterVisibility() {
+  dailyFilter.style.display = currentView === "daily" ? "flex" : "none";
+  monthlyFilter.style.display = currentView === "monthly" ? "flex" : "none";
+  yearlyFilter.style.display = currentView === "yearly" ? "flex" : "none";
+  const labels = { daily: "Download Day", monthly: "Download Month", yearly: "Download Year", all: "Download All" };
+  downloadBtnLabel.textContent = labels[currentView] || "Download";
+}
+
 // --- Tabs ---
 viewTabs.addEventListener("click", (e) => {
   const btn = e.target.closest(".tab-btn");
@@ -135,35 +207,27 @@ function monthLabel(key) {
     year: "numeric",
   });
 }
-// ISO-ish week key: year + week number (Mon-Sun), so "weekly" groups
-// expenses that fall in the same calendar week.
-function weekKey(d) {
-  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const day = date.getUTCDay() || 7;
-  date.setUTCDate(date.getUTCDate() + 4 - day);
-  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
-  const weekNo = Math.ceil(((date - yearStart) / 86400000 + 1) / 7);
-  return `${date.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`;
-}
-function weekRangeLabel(dates) {
-  const sorted = [...dates].sort((a, b) => a - b);
-  const start = sorted[0];
-  const end = sorted[sorted.length - 1];
-  const fmt = (d) => d.toLocaleDateString(undefined, { day: "2-digit", month: "short" });
-  return `${fmt(start)} - ${fmt(end)}`;
+function formatDate(dKey) {
+  const [y, m, d] = dKey.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
 }
 function renderCurrentView() {
   reportTables.innerHTML = "";
   computeOverallTotals();
   allExpensesPagination.style.display = "none";
+  updateFilterVisibility();
   if (allExpenses.length === 0) {
     reportEmpty.style.display = "block";
     return;
   }
   reportEmpty.style.display = "none";
   if (currentView === "daily") renderDaily();
-  else if (currentView === "weekly") renderWeekly();
-  else if (currentView === "monthly") renderMonthly();
+  else if (currentView === "monthly") renderMonthlyView();
+  else if (currentView === "yearly") renderYearlyView();
   else loadAllExpensesPage(1);
 }
 // --- "All Expenses" tab: flat, paginated list (10 per page) ---
@@ -225,126 +289,135 @@ function computeOverallTotals() {
   totalExpenseEl.textContent = money(expense);
   totalSavingsEl.textContent = money(income - expense);
 }
-// --- Daily view: each day's rows plus a per-day + per-month subtotal ---
+// --- Daily view: filtered to the date picked in dailyDatePicker ---
 function renderDaily() {
-  const byMonth = new Map();
+  const dateStr = dailyDatePicker.value || todayStr();
+  const dayExpenses = allExpenses.filter((exp) => dayKey(new Date(exp.createdAt)) === dateStr);
+  if (dayExpenses.length === 0) {
+    reportTables.innerHTML = `<div class="empty-state">No expenses recorded on ${formatDate(dateStr)}.</div>`;
+    return;
+  }
+  let dayIncome = 0;
+  let dayExpense = 0;
+  let rowsHtml = "";
+  dayExpenses.forEach((exp) => {
+    const income = isIncome(exp);
+    if (income) dayIncome += Number(exp.amount);
+    else dayExpense += Number(exp.amount);
+    rowsHtml += `
+      <tr>
+        <td>${escapeHtml(exp.description)}</td>
+        <td>${escapeHtml(exp.category)}</td>
+        <td class="amount-cell">${income ? money(exp.amount) : ""}</td>
+        <td class="amount-cell expense-amount">${income ? "" : money(exp.amount)}</td>
+      </tr>`;
+  });
+  reportTables.innerHTML = `
+    <h3 class="report-section-title">${formatDate(dateStr)}</h3>
+    <table class="report-table">
+      <thead>
+        <tr><th>Description</th><th>Category</th><th>Income</th><th>Expense</th></tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+      <tfoot>
+        <tr class="report-total-row">
+          <td colspan="2">Day total</td>
+          <td class="amount-cell">${money(dayIncome)}</td>
+          <td class="amount-cell expense-amount">${money(dayExpense)}</td>
+        </tr>
+        <tr class="report-savings-row"><td colspan="4">Savings = ${money(dayIncome - dayExpense)}</td></tr>
+      </tfoot>
+    </table>`;
+}
+// --- Monthly view: filtered to the month + year selected above ---
+function renderMonthlyView() {
+  const month = parseInt(monthSelect.value, 10);
+  const year = parseInt(yearSelectMonthly.value, 10);
+  const key = `${year}-${String(month).padStart(2, "0")}`;
+  const byDay = new Map();
   allExpenses.forEach((exp) => {
     const d = new Date(exp.createdAt);
-    const mKey = monthKey(d);
-    if (!byMonth.has(mKey)) byMonth.set(mKey, new Map());
-    const byDay = byMonth.get(mKey);
+    if (d.getMonth() + 1 !== month || d.getFullYear() !== year) return;
     const dKey = dayKey(d);
     if (!byDay.has(dKey)) byDay.set(dKey, []);
     byDay.get(dKey).push(exp);
   });
-  const monthKeys = [...byMonth.keys()].sort().reverse();
-  monthKeys.forEach((mKey) => {
-    const byDay = byMonth.get(mKey);
-    const dayKeys = [...byDay.keys()].sort().reverse();
-    let monthIncome = 0;
-    let monthExpense = 0;
-    let rowsHtml = "";
-    dayKeys.forEach((dKey) => {
-      const rows = byDay.get(dKey);
-      let dayIncome = 0;
-      let dayExpense = 0;
-      rows.forEach((exp, i) => {
-        const income = isIncome(exp);
-        if (income) dayIncome += Number(exp.amount);
-        else dayExpense += Number(exp.amount);
-        rowsHtml += `
-          <tr>
-            <td>${i === 0 ? formatDate(dKey) : ""}</td>
-            <td>${escapeHtml(exp.description)}</td>
-            <td>${escapeHtml(exp.category)}</td>
-            <td class="amount-cell">${income ? money(exp.amount) : ""}</td>
-            <td class="amount-cell expense-amount">${income ? "" : money(exp.amount)}</td>
-          </tr>`;
-      });
-      rowsHtml += `
-        <tr class="report-subtotal-row">
-          <td colspan="3">Day total</td>
-          <td class="amount-cell">${money(dayIncome)}</td>
-          <td class="amount-cell expense-amount">${money(dayExpense)}</td>
-        </tr>`;
-      monthIncome += dayIncome;
-      monthExpense += dayExpense;
-    });
-    reportTables.insertAdjacentHTML(
-      "beforeend",
-      `
-      <h3 class="report-section-title">${monthLabel(mKey)}</h3>
-      <table class="report-table">
-        <thead>
-          <tr><th>Date</th><th>Description</th><th>Category</th><th>Income</th><th>Expense</th></tr>
-        </thead>
-        <tbody>
-          ${rowsHtml}
-        </tbody>
-        <tfoot>
-          <tr class="report-total-row">
-            <td colspan="3">Month total</td>
-            <td class="amount-cell">${money(monthIncome)}</td>
-            <td class="amount-cell expense-amount">${money(monthExpense)}</td>
-          </tr>
-          <tr class="report-savings-row">
-            <td colspan="5">Savings = ${money(monthIncome - monthExpense)}</td>
-          </tr>
-        </tfoot>
-      </table>`,
-    );
-  });
-}
-// --- Weekly view: one row per week ---
-function renderWeekly() {
-  const byWeek = new Map();
-  allExpenses.forEach((exp) => {
-    const d = new Date(exp.createdAt);
-    const key = weekKey(d);
-    if (!byWeek.has(key)) byWeek.set(key, { income: 0, expense: 0, dates: [] });
-    const bucket = byWeek.get(key);
-    if (isIncome(exp)) bucket.income += Number(exp.amount);
-    else bucket.expense += Number(exp.amount);
-    bucket.dates.push(d);
-  });
-  const weekKeys = [...byWeek.keys()].sort().reverse();
+  if (byDay.size === 0) {
+    reportTables.innerHTML = `<div class="empty-state">No expenses recorded in ${monthLabel(key)}.</div>`;
+    return;
+  }
+  const dayKeys = [...byDay.keys()].sort().reverse();
+  let monthIncome = 0;
+  let monthExpense = 0;
   let rowsHtml = "";
-  weekKeys.forEach((key) => {
-    const bucket = byWeek.get(key);
+  dayKeys.forEach((dKey) => {
+    const rows = byDay.get(dKey);
+    let dayIncome = 0;
+    let dayExpense = 0;
+    rows.forEach((exp, i) => {
+      const income = isIncome(exp);
+      if (income) dayIncome += Number(exp.amount);
+      else dayExpense += Number(exp.amount);
+      rowsHtml += `
+        <tr>
+          <td>${i === 0 ? formatDate(dKey) : ""}</td>
+          <td>${escapeHtml(exp.description)}</td>
+          <td>${escapeHtml(exp.category)}</td>
+          <td class="amount-cell">${income ? money(exp.amount) : ""}</td>
+          <td class="amount-cell expense-amount">${income ? "" : money(exp.amount)}</td>
+        </tr>`;
+    });
     rowsHtml += `
-      <tr>
-        <td>${weekRangeLabel(bucket.dates)}</td>
-        <td class="amount-cell">${money(bucket.income)}</td>
-        <td class="amount-cell expense-amount">${money(bucket.expense)}</td>
-        <td class="amount-cell">${money(bucket.income - bucket.expense)}</td>
+      <tr class="report-subtotal-row">
+        <td colspan="3">Day total</td>
+        <td class="amount-cell">${money(dayIncome)}</td>
+        <td class="amount-cell expense-amount">${money(dayExpense)}</td>
       </tr>`;
+    monthIncome += dayIncome;
+    monthExpense += dayExpense;
   });
-  reportTables.insertAdjacentHTML(
-    "beforeend",
-    `
+  reportTables.innerHTML = `
+    <h3 class="report-section-title">${monthLabel(key)}</h3>
     <table class="report-table">
       <thead>
-        <tr><th>Week</th><th>Income</th><th>Expense</th><th>Savings</th></tr>
+        <tr><th>Date</th><th>Description</th><th>Category</th><th>Income</th><th>Expense</th></tr>
       </thead>
       <tbody>${rowsHtml}</tbody>
-    </table>`,
-  );
+      <tfoot>
+        <tr class="report-total-row">
+          <td colspan="3">Month total</td>
+          <td class="amount-cell">${money(monthIncome)}</td>
+          <td class="amount-cell expense-amount">${money(monthExpense)}</td>
+        </tr>
+        <tr class="report-savings-row"><td colspan="5">Savings = ${money(monthIncome - monthExpense)}</td></tr>
+      </tfoot>
+    </table>`;
 }
-// --- Monthly view: one row per month (mirrors the "Yearly Report" table) ---
-function renderMonthly() {
+// --- Yearly view: filtered to the year selected above, one row per month ---
+function renderYearlyView() {
+  const year = parseInt(yearSelectYearly.value, 10);
   const byMonth = new Map();
   allExpenses.forEach((exp) => {
     const d = new Date(exp.createdAt);
+    if (d.getFullYear() !== year) return;
     const key = monthKey(d);
     if (!byMonth.has(key)) byMonth.set(key, { income: 0, expense: 0 });
     const bucket = byMonth.get(key);
     if (isIncome(exp)) bucket.income += Number(exp.amount);
     else bucket.expense += Number(exp.amount);
   });
+  if (byMonth.size === 0) {
+    reportTables.innerHTML = `<div class="empty-state">No expenses recorded in ${year}.</div>`;
+    return;
+  }
   const monthKeys = [...byMonth.keys()].sort().reverse();
+  let yearIncome = 0;
+  let yearExpense = 0;
   let rowsHtml = "";
   monthKeys.forEach((key) => {
     const bucket = byMonth.get(key);
+    yearIncome += bucket.income;
+    yearExpense += bucket.expense;
     rowsHtml += `
       <tr>
         <td>${monthLabel(key)}</td>
@@ -353,37 +426,47 @@ function renderMonthly() {
         <td class="amount-cell">${money(bucket.income - bucket.expense)}</td>
       </tr>`;
   });
-  reportTables.insertAdjacentHTML(
-    "beforeend",
-    `
-    <h3 class="report-section-title">Yearly Report</h3>
+  reportTables.innerHTML = `
+    <h3 class="report-section-title">${year} Report</h3>
     <table class="report-table">
       <thead>
         <tr><th>Month</th><th>Income</th><th>Expense</th><th>Savings</th></tr>
       </thead>
       <tbody>${rowsHtml}</tbody>
-    </table>`,
-  );
+      <tfoot>
+        <tr class="report-total-row">
+          <td>Year total</td>
+          <td class="amount-cell">${money(yearIncome)}</td>
+          <td class="amount-cell expense-amount">${money(yearExpense)}</td>
+          <td class="amount-cell">${money(yearIncome - yearExpense)}</td>
+        </tr>
+      </tfoot>
+    </table>`;
 }
-function formatDate(dKey) {
-  const [y, m, d] = dKey.split("-").map(Number);
-  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
+// --- Download: backend generates the CSV (scoped to whichever
+// date/month/year the active tab has selected), uploads it to S3, and
+// returns a presigned URL. We show that URL (and open it) rather than
+// building the file in the browser. ---
+function downloadQueryString() {
+  if (currentView === "daily") {
+    return `?type=date&date=${encodeURIComponent(dailyDatePicker.value || todayStr())}`;
+  }
+  if (currentView === "monthly") {
+    return `?type=month&month=${encodeURIComponent(monthSelect.value)}&year=${encodeURIComponent(yearSelectMonthly.value)}`;
+  }
+  if (currentView === "yearly") {
+    return `?type=year&year=${encodeURIComponent(yearSelectYearly.value)}`;
+  }
+  return ""; // "all" tab - no filter, matches the original full-history download.
 }
-// --- Download: backend generates the CSV, uploads it to S3, and returns
-// a presigned URL. We show that URL (and open it) rather than building
-// the file in the browser. ---
 downloadBtn.addEventListener("click", async () => {
   if (downloadBtn.disabled || !isPremiumUser) return;
   downloadBtn.disabled = true;
-  const originalLabel = downloadBtn.textContent;
-  downloadBtn.textContent = "Generating...";
+  const originalLabel = downloadBtnLabel.textContent;
+  downloadBtnLabel.textContent = "Generating...";
   downloadResult.style.display = "none";
   try {
-    const res = await fetch("/report/generate");
+    const res = await fetch(`/report/generate${downloadQueryString()}`);
     if (res.status === 401) {
       downloadResult.textContent = "This feature is available to Premium members only.";
       downloadResult.style.display = "block";
@@ -400,7 +483,7 @@ downloadBtn.addEventListener("click", async () => {
     downloadResult.style.display = "block";
   } finally {
     downloadBtn.disabled = false;
-    downloadBtn.textContent = originalLabel;
+    downloadBtnLabel.textContent = originalLabel;
   }
 });
 // --- Past downloads list (bonus task) ---
@@ -419,11 +502,11 @@ async function loadReportHistory() {
     reportHistoryBody.innerHTML = history
       .map(
         (r) => `
-        <tr>
-          <td>${r.fileName}</td>
-          <td>${new Date(r.generatedAt).toLocaleString()}</td>
-          <td><a href="${r.fileUrl}" target="_blank" rel="noopener">Download</a></td>
-        </tr>`,
+      <tr>
+        <td>${r.fileName}</td>
+        <td>${new Date(r.generatedAt).toLocaleString()}</td>
+        <td><a href="${r.fileUrl}" target="_blank" rel="noopener">Download</a></td>
+      </tr>`,
       )
       .join("");
   } catch {
